@@ -6,9 +6,15 @@ from .region import Region
 from .errors import OutOfBoundsCoordinates, ChunkNotFound
 
 
-class ChunkFormat(StrEnum):
-    OLD: str = "old"
-    NEW: str = "new"
+_VERSION_1_16 = 2566
+
+# This version removes block state value stretching from the storage
+# so a block value isn't in multiple elements of the array
+_VERSION_20w17a = 2529
+
+# This is the version where "The Flattening" (https://minecraft.gamepedia.com/Java_Edition_1.13/Flattening) happened
+# where blocks went from numeric ids to namespaced ids (namespace:block_id)
+_VERSION_17w47a = 1451
 
 
 def bin_append(a, b, length=None):
@@ -38,23 +44,35 @@ class Chunk:
         Chunk's X position
     z: :class:`int`
         Chunk's Z position
+    version: :class:`int`
+        Version of the chunk NBT structure
+    format: :class:`str`
+        Chunk's format, either ``old`` or ``new``
     data: :class:`nbt.TAG_Compound`
         Raw NBT data of the chunk
     tile_entities: :class:`nbt.TAG_Compound`
         ``self.data['TileEntities']`` as an attribute for easier use
     """
-    __slots__ = ('nbt', 'x', 'z', 'tile_entities')
+    __slots__ = ('version', 'nbt', 'x', 'z', 'tile_entities')
 
     def __init__(self, nbt_data: nbt.NBTFile):
+        try:
+            self.version = nbt_data['DataVersion'].value
+        except KeyError:
+            # Version is pre-1.9 snapshot 15w32a, so world does not have a Data Version.
+            # See https://minecraft.fandom.com/wiki/Data_version
+            self.version = 0
+
         if 'Level' in nbt_data:
             nbt_data = nbt_data['Level']
-            self.format = ChunkFormat.OLD
         else:
-            self.format = ChunkFormat.NEW
+            self.version = _VERSION_1_16
+
         self.nbt = nbt_data
         self.x = nbt_data['xPos'].value
         self.z = nbt_data['zPos'].value
-        self.tile_entities = nbt_data['block_entities']
+        tile_entities_key = 'block_entities' if self.version == _VERSION_1_16 else 'TileEntities'
+        self.tile_entities = nbt_data[tile_entities_key]
         #self.sections = nbt_data['sections']
         #self.biomes = self.sections['biomes']
 
@@ -77,7 +95,8 @@ class Chunk:
             raise OutOfBoundsCoordinates(f'Y ({y!r}) must be in range of -4 to 19')
 
         try:
-            sections = self.nbt["sections"]
+            sections_key = "sections" if self.version == _VERSION_1_16 else "Sections"
+            sections = self.nbt[sections_key]
         except KeyError:
             return None
 
@@ -100,7 +119,11 @@ class Chunk:
             section = self.get_section(section)
         if section is None:
             return
-        return tuple(Block.from_palette(i) for i in section['block_states']['palette'])
+        
+        if self.version == _VERSION_1_16:
+            return tuple(Block.from_palette(i) for i in section['block_states']['palette'])
+        else:
+            return tuple(Block.from_palette(i) for i in section['Palette'])
         
 
     def get_block(self, x: int, y: int, z: int, section: Union[int, nbt.TAG_Compound]=None) -> Block:
@@ -134,23 +157,54 @@ class Chunk:
             # global Y to section Y
             y %= 16
 
+        if self.version < _VERSION_17w47a:
+            # Explained in depth here https://minecraft.gamepedia.com/index.php?title=Chunk_format&oldid=1153403#Block_format
+
+            if section is None or 'Blocks' not in section:
+                return Block.from_name('minecraft:air')
+
+            index = y * 16 * 16 + z * 16 + x
+
+            block_id = section['Blocks'][index]
+            if 'Add' in section:
+                block_id += nibble(section['Add'], index) << 8
+
+            block_data = nibble(section['Data'], index)
+
+            return Block.from_numeric_id(block_id, block_data)
+
         # If its an empty section its most likely an air block
-        if section is None or 'block_states' not in section or 'data' not in section['block_states']:
-            return Block.from_name('minecraft:air')
+        if self.version < _VERSION_1_16:
+            if section is None or 'BlockStates' not in section:
+                return Block.from_name('minecraft:air')
+        else:
+            if section is None or 'block_states' not in section or 'data' not in section['block_states']:
+                return Block.from_name('minecraft:air')
 
         # Number of bits each block is on block_states
-        # Number of bits each block is on block_states
         # Cannot be lower than 4
-        bits = max((len(section['block_states']['palette']) - 1).bit_length(), 4)
+        if self.version < _VERSION_1_16:
+            bits = max((len(section['Palette']) - 1).bit_length(), 4)
+        else:
+            bits = max((len(section['block_states']['palette']) - 1).bit_length(), 4)
 
         # Get index on the block list with the order YZX
         index = y * 16*16 + z * 16 + x
 
         # block_states is an array of 64 bit numbers
         # that holds the blocks index on the palette list
-        states = section['block_states']['data'].value
+        if self.version < _VERSION_1_16:
+            states = section['BlockStates'].value
+        else:
+            states = section['block_states']['data'].value
 
-        state = index // (64 // bits)
+        # in 20w17a and newer blocks cannot occupy more than one element on the BlockStates array
+        stretches = self.version < _VERSION_20w17a
+
+        if stretches:
+            state = index * bits // 64
+        else:
+            state = index // (64 // bits)
 
         # makes sure the number is unsigned
         # by adding 2^64
@@ -159,13 +213,39 @@ class Chunk:
         if data < 0:
             data += 2**64
 
-        shifted_data = data >> (index % (64 // bits) * bits)
+
+        if stretches:
+            # shift the number to the right to remove the left over bits
+            # and shift so the i'th block is the first one
+            shifted_data = data >> ((bits * index) % 64)
+        else:
+            shifted_data = data >> (index % (64 // bits) * bits)
+
+        # if there aren't enough bits it means the rest are in the next number
+        if stretches and 64 - ((bits * index) % 64) < bits:
+            data = states[state + 1]
+            if data < 0:
+                data += 2**64
+
+            # get how many bits are from a palette index of the next block
+            leftover = (bits - ((state + 1) * 64 % bits)) % bits
+
+            # Make sure to keep the length of the bits in the first state
+            # Example: bits is 5, and leftover is 3
+            # Next state                Current state (already shifted)
+            # 0b101010110101101010010   0b01
+            # will result in bin_append(0b010, 0b01, 2) = 0b01001
+            shifted_data = bin_append(data & 2**leftover - 1, shifted_data, bits-leftover)
 
         # get `bits` least significant bits
         # which are the palette index
         palette_id = shifted_data & 2**bits - 1
 
-        block = section['block_states']['palette'][palette_id]
+        if self.version < _VERSION_1_16:
+            block = section['Palette'][palette_id]
+        else:
+            block = section['block_states']['palette'][palette_id]
+
         return Block.from_palette(block)
 
     def stream_blocks(self, index: int=0, section: Union[int, nbt.TAG_Compound]=None) -> Generator[Block, None, None]:
@@ -200,18 +280,56 @@ class Chunk:
         if section is None or isinstance(section, int):
             section = self.get_section(section or 0)
 
-        if section is None or 'block_states' not in section or 'data' not in section['block_states']:
+        if self.version < _VERSION_17w47a:
+            if section is None or 'Blocks' not in section:
+                air = Block.from_name('minecraft:air') if force_new else OldBlock(0)
+                for i in range(4096):
+                    yield air
+                return
+
+            while index < 4096:
+                block_id = section['Blocks'][index]
+                if 'Add' in section:
+                    block_id += nibble(section['Add'], index) << 8
+
+                block_data = nibble(section['Data'], index)
+
+                block = OldBlock(block_id, block_data)
+                if force_new:
+                    yield block.convert()
+                else:
+                    yield block
+
+                index += 1
+            return
+
+        no_section = False
+        if self.version < _VERSION_1_16:
+            no_section = section is None or 'BlockStates' not in section
+        else:
+            no_section = section is None or 'block_states' not in section or 'data' not in section['block_states']
+
+        if no_section:
             air = Block.from_name('minecraft:air')
             for i in range(4096):
                 yield air
             return
 
-        states = section['block_states']['data'].value
-        palette = section['block_states']['palette']
+        if self.version < _VERSION_1_16:
+            states = section['BlockStates'].value
+            palette = section['Palette']
+        else:
+            states = section['block_states']['data'].value
+            palette = section['block_states']['palette']
 
         bits = max((len(palette) - 1).bit_length(), 4)
 
-        state = index // (64 // bits)
+        stretches = self.version < _VERSION_20w17a
+
+        if stretches:
+            state = index * bits // 64
+        else:
+            state = index // (64 // bits)
 
         data = states[state]
         if data < 0:
@@ -219,7 +337,10 @@ class Chunk:
 
         bits_mask = 2**bits - 1
 
-        offset = index % (64 // bits) * bits
+        if stretches:
+            offset = (bits * index) % 64
+        else:
+            offset = index % (64 // bits) * bits
 
         data_len = 64 - offset
         data >>= offset
@@ -230,8 +351,15 @@ class Chunk:
                 new_data = states[state]
                 if new_data < 0:
                     new_data += 2**64
-                data = new_data
-                data_len = 64
+
+                if stretches:
+                    leftover = data_len
+                    data_len += 64
+
+                    data = bin_append(new_data, data, leftover)
+                else:
+                    data = new_data
+                    data_len = 64
 
             palette_id = data & bits_mask
             yield Block.from_palette(palette[palette_id])

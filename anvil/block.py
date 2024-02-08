@@ -1,5 +1,6 @@
 from nbt import nbt
 from frozendict import frozendict
+from .legacy import LEGACY_ID_MAP
 
 class Block:
     """
@@ -82,3 +83,22 @@ class Block:
         if properties:
             properties = dict(properties)
         return cls.from_name(name, properties=properties)
+
+    @classmethod
+    def from_numeric_id(cls, block_id: int, data: int=0):
+        """
+        Creates a new Block from the block_id:data fromat used pre-flattening (pre-1.13)
+        Parameters
+        ----------
+        block_id
+            Numeric ID of the block
+        data
+            Numeric data, used to represent variants of the block
+        """
+        # See https://minecraft.gamepedia.com/Java_Edition_data_value/Pre-flattening
+        # and https://minecraft.gamepedia.com/Java_Edition_data_value for current values
+        key = f'{block_id}:{data}'
+        if key not in LEGACY_ID_MAP:
+            raise KeyError(f'Block {key} not found')
+        name, properties = LEGACY_ID_MAP[key]
+        return cls('minecraft', name, properties=properties)
