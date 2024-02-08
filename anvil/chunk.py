@@ -1,9 +1,14 @@
 from typing import Union, Tuple, Generator, Optional
 from nbt import nbt
+from enum import StrEnum
 from .block import Block
 from .region import Region
 from .errors import OutOfBoundsCoordinates, ChunkNotFound
-import math
+
+
+class ChunkFormat(StrEnum):
+    OLD: str = "old"
+    NEW: str = "new"
 
 
 def bin_append(a, b, length=None):
@@ -41,6 +46,11 @@ class Chunk:
     __slots__ = ('nbt', 'x', 'z', 'tile_entities')
 
     def __init__(self, nbt_data: nbt.NBTFile):
+        if 'Level' in nbt_data:
+            nbt_data = nbt_data['Level']
+            self.format = ChunkFormat.OLD
+        else:
+            self.format = ChunkFormat.NEW
         self.nbt = nbt_data
         self.x = nbt_data['xPos'].value
         self.z = nbt_data['zPos'].value
