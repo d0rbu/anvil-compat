@@ -76,7 +76,7 @@ class EmptyChunk:
             raise OutOfBoundsCoordinates(f'Y ({y!r}) must be in range of -63 to 319')
         section = self.sections[y // 16]
         if section is None:
-            return
+            return Block.from_name('minecraft:air')
         return section.get_block(x, y % 16, z)
 
     def set_block(self, block: Block, x: int, y: int, z: int):
