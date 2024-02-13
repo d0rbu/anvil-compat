@@ -171,7 +171,10 @@ class Chunk:
 
             block_data = nibble(section['Data'], index)
 
-            return Block.from_numeric_id(block_id, block_data)
+            try:
+                return Block.from_numeric_id(block_id, block_data)
+            except KeyError as e:
+                return Block.from_numeric_id(block_id)  # see if we can get a valid block without data
 
         # If its an empty section its most likely an air block
         if self.version < _VERSION_1_16:
