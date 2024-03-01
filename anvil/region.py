@@ -47,6 +47,9 @@ class Region:
         chunk_z
             Chunk's Z value
         """
+        if len(self.data) <= 0:
+            return (0, 0)
+
         b_off = self.header_offset(chunk_x, chunk_z)
         off = int.from_bytes(self.data[b_off : b_off + 3], byteorder='big')
         sectors = self.data[b_off + 3]
