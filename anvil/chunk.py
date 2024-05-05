@@ -177,7 +177,7 @@ class Chunk:
                 return Block.from_numeric_id(block_id)  # see if we can get a valid block without data
 
         # If its an empty section its most likely an air block
-        if self.version < _VERSION_1_16:
+        if self.version != _VERSION_1_16:
             if section is None or 'BlockStates' not in section:
                 return Block.from_name('minecraft:air')
         else:
@@ -186,7 +186,7 @@ class Chunk:
 
         # Number of bits each block is on block_states
         # Cannot be lower than 4
-        if self.version < _VERSION_1_16:
+        if self.version != _VERSION_1_16:
             bits = max((len(section['Palette']) - 1).bit_length(), 4)
         else:
             bits = max((len(section['block_states']['palette']) - 1).bit_length(), 4)
@@ -196,7 +196,7 @@ class Chunk:
 
         # block_states is an array of 64 bit numbers
         # that holds the blocks index on the palette list
-        if self.version < _VERSION_1_16:
+        if self.version != _VERSION_1_16:
             states = section['BlockStates'].value
         else:
             states = section['block_states']['data'].value
@@ -244,7 +244,7 @@ class Chunk:
         # which are the palette index
         palette_id = shifted_data & 2**bits - 1
 
-        if self.version < _VERSION_1_16:
+        if self.version != _VERSION_1_16:
             block = section['Palette'][palette_id]
         else:
             block = section['block_states']['palette'][palette_id]
@@ -307,7 +307,7 @@ class Chunk:
             return
 
         no_section = False
-        if self.version < _VERSION_1_16:
+        if self.version != _VERSION_1_16:
             no_section = section is None or 'BlockStates' not in section
         else:
             no_section = section is None or 'block_states' not in section or 'data' not in section['block_states']
@@ -318,7 +318,7 @@ class Chunk:
                 yield air
             return
 
-        if self.version < _VERSION_1_16:
+        if self.version != _VERSION_1_16:
             states = section['BlockStates'].value
             palette = section['Palette']
         else:
